@@ -9,6 +9,14 @@
 #include "suffix.h"
 #include "common.h"
 
+static const uint8_t zero_uuid[16] = {
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t invalid_uuid[16] = {
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
 static const char *nvme_ana_state_to_string(enum nvme_ana_state state)
 {
 	switch (state) {
@@ -100,6 +108,31 @@ static void format(char *formatter, size_t fmt_sz, char *tofmt, size_t tofmtsz)
 	}
 }
 
+static const char *nvme_uuid_to_string(uuid_t uuid)
+{
+	/* large enough to hold uuid str (37) + null-termination byte */
+	static char uuid_str[40];
+
+#ifdef LIBUUID
+	uuid_unparse_lower(uuid, uuid_str);
+#else
+	static const char *hex_digits = "0123456789abcdef";
+	char *p = &uuid_str[0];
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		*p++ = hex_digits[(uuid.b[i] & 0xf0) >> 4];
+		*p++ = hex_digits[uuid.b[i] & 0x0f];
+		if (i == 3 || i == 5 || i == 7 || i == 9)
+			*p++ = '-';
+	}
+
+	*p = '\0';
+#endif
+
+	return uuid_str;
+}
+
 static void show_nvme_id_ctrl_cmic(__u8 cmic)
 {
 	__u8 rsvd = (cmic & 0xF0) >> 4;
@@ -139,16 +172,21 @@ static void show_nvme_id_ctrl_oaes(__le32 ctrl_oaes)
 static void show_nvme_id_ctrl_ctratt(__le32 ctrl_ctratt)
 {
 	__u32 ctratt = le32_to_cpu(ctrl_ctratt);
-	__u32 rsvd0 = ctratt >> 6;
+	__u32 rsvd0 = ((ctratt >> 6) & 0x7);
+	__u32 rsvd1 = ctratt >> 10;
 	__u32 hostid128 = (ctratt & NVME_CTRL_CTRATT_128_ID) >> 0;
 	__u32 psp = (ctratt & NVME_CTRL_CTRATT_NON_OP_PSP) >> 1;
 	__u32 sets = (ctratt & NVME_CTRL_CTRATT_NVM_SETS) >> 2;
 	__u32 rrl = (ctratt & NVME_CTRL_CTRATT_READ_RECV_LVLS) >> 3;
 	__u32 eg = (ctratt & NVME_CTRL_CTRATT_ENDURANCE_GROUPS) >> 4;
 	__u32 iod = (ctratt & NVME_CTRL_CTRATT_PREDICTABLE_LAT) >> 5;
+	__u32 uuidlist = (ctratt & NVME_CTRL_CTRATT_UUID_LIST) >> 9;
 
-	if (rsvd0)
-		printf(" [31:6] : %#x\tReserved\n", rsvd0);
+	if (rsvd1)
+		printf(" [31:10] : %#x\tReserved\n", rsvd1);
+	printf("  [9:9] : %#x\tUUID List %sSupported\n",
+		uuidlist, uuidlist ? "" : "Not ");
+	printf("  [8:6] : %#x\tReserved\n", rsvd0);
 	printf("  [5:5] : %#x\tPredictable Latency Mode %sSupported\n",
 		iod, iod ? "" : "Not ");
 	printf("  [4:4] : %#x\tEndurance Groups %sSupported\n",
@@ -1214,6 +1252,81 @@ void json_nvme_list_secondary_ctrl(const struct nvme_secondary_controllers_list 
 	json_free_object(root);
 }
 
+void show_nvme_id_uuid_list(const struct nvme_id_uuid_list *uuid_list, unsigned int flags)
+{
+	int i, human = flags & HUMAN;
+
+	/* The 0th entry is reserved */
+	for (i = 1; i < NVME_MAX_UUID_ENTRIES; i++) {
+		uuid_t uuid;
+		char *association = "";
+		uint8_t identifier_association = uuid_list->entry[i].header & 0x3;
+
+		/* The list is terminated by a zero UUID value */
+		if (memcmp(uuid_list->entry[i].uuid, zero_uuid, sizeof(zero_uuid)) == 0)
+			break;
+
+		memcpy(&uuid, uuid_list->entry[i].uuid, sizeof(uuid));
+
+		if (human) {
+			switch (identifier_association) {
+			case 0x0:
+				association = "No association reported";
+				break;
+			case 0x1:
+				association = "associated with PCI Vendor ID";
+				break;
+			case 0x2:
+				association = "associated with PCI Subsystem Vendor ID";
+				break;
+			default:
+				association = "Reserved";
+				break;
+			}
+		}
+
+		printf(" Entry[%3d]\n", i);
+		printf(".................\n");
+		printf("association  : 0x%x %s\n", identifier_association, association);
+		printf("UUID         : %s", nvme_uuid_to_string(uuid));
+		if (memcmp(uuid_list->entry[i].uuid, invalid_uuid, sizeof(zero_uuid)) == 0)
+			printf(" (Invalid UUID)");
+		printf("\n.................\n");
+	}
+}
+
+void json_nvme_id_uuid_list(struct nvme_id_uuid_list *uuid_list)
+{
+	struct json_object *root;
+	struct json_array *entries;
+	int i;
+
+	root = json_create_object();
+	entries = json_create_array();
+
+	/* The 0th entry is reserved */
+	for (i = 1; i < NVME_MAX_UUID_ENTRIES; i++) {
+		uuid_t uuid;
+		struct json_object *entry = json_create_object();
+
+		/* The list is terminated by a zero UUID value */
+		if (memcmp(uuid_list->entry[i].uuid, zero_uuid, sizeof(zero_uuid)) == 0)
+			break;
+
+		memcpy(&uuid, uuid_list->entry[i].uuid, sizeof(uuid));
+
+		json_object_add_value_int(entry, "association", uuid_list->entry[i].header & 0x3);
+		json_object_add_value_string(entry, "uuid", nvme_uuid_to_string(uuid));
+		json_array_add_value_object(entries, entry);
+	}
+
+	json_object_add_value_array(root, "UUID-list", entries);
+
+	json_print_object(root, NULL);
+	printf("\n");
+	json_free_object(root);
+}
+
 void show_error_log(struct nvme_error_log_page *err_log, int entries, const char *devname)
 {
 	int i;
@@ -1336,6 +1449,7 @@ static void show_effects_log_human(__u32 effect)
 	printf("  NCC%s", (effect & NVME_CMD_EFFECTS_NCC) ? set : clr);
 	printf("  NIC%s", (effect & NVME_CMD_EFFECTS_NIC) ? set : clr);
 	printf("  CCC%s", (effect & NVME_CMD_EFFECTS_CCC) ? set : clr);
+	printf("  USS%s", (effect & NVME_CMD_EFFECTS_UUID_SEL) ? set : clr);
 
 	if ((effect & NVME_CMD_EFFECTS_CSE_MASK) >> 16 == 0)
 		printf("  No command restriction\n");

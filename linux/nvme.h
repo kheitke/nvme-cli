@@ -302,6 +302,7 @@ enum {
 	NVME_CTRL_CTRATT_READ_RECV_LVLS		= 1 << 3,
 	NVME_CTRL_CTRATT_ENDURANCE_GROUPS	= 1 << 4,
 	NVME_CTRL_CTRATT_PREDICTABLE_LAT	= 1 << 5,
+	NVME_CTRL_CTRATT_UUID_LIST		= 1 << 9,
 };
 
 struct nvme_lbaf {
@@ -356,6 +357,7 @@ enum {
 	NVME_ID_CNS_CTRL_NS_LIST	= 0x12,
 	NVME_ID_CNS_CTRL_LIST		= 0x13,
 	NVME_ID_CNS_SCNDRY_CTRL_LIST	= 0x15,
+	NVME_ID_CNS_UUID_LIST		= 0x17,
 };
 
 enum {
@@ -424,6 +426,18 @@ struct nvme_id_nvmset {
 	__u8				nid;
 	__u8				rsvd1[127];
 	struct nvme_nvmset_attr_entry	ent[NVME_MAX_NVMSET];
+};
+
+#define NVME_MAX_UUID_ENTRIES	128
+
+struct nvme_id_uuid_list_entry {
+	__u8			header;
+	__u8			rsvd1[15];
+	__u8			uuid[16];
+};
+
+struct nvme_id_uuid_list {
+	struct nvme_id_uuid_list_entry	entry[NVME_MAX_UUID_ENTRIES];
 };
 
 /* Derived from 1.3a Figure 101: Get Log Page – Telemetry Host
@@ -535,6 +549,7 @@ enum {
 	NVME_CMD_EFFECTS_NIC		= 1 << 3,
 	NVME_CMD_EFFECTS_CCC		= 1 << 4,
 	NVME_CMD_EFFECTS_CSE_MASK	= 3 << 16,
+	NVME_CMD_EFFECTS_UUID_SEL	= 1 << 19,
 };
 
 struct nvme_effects_log {
@@ -1447,5 +1462,9 @@ struct nvme_completion {
 #define NVME_MAJOR(ver)		((ver) >> 16)
 #define NVME_MINOR(ver)		(((ver) >> 8) & 0xff)
 #define NVME_TERTIARY(ver)	((ver) & 0xff)
+
+_Static_assert(sizeof(struct nvme_id_ctrl) == NVME_IDENTIFY_DATA_SIZE, "size mismatch");
+_Static_assert(sizeof(struct nvme_id_nvmset) == NVME_IDENTIFY_DATA_SIZE, "size mismatch");
+_Static_assert(sizeof(struct nvme_id_uuid_list) == NVME_IDENTIFY_DATA_SIZE, "size mismatch");
 
 #endif /* _LINUX_NVME_H */
